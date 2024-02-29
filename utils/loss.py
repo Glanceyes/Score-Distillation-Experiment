@@ -44,4 +44,4 @@ class SDSLoss:
         self.unet = unet
         self.scheduler = scheduler
         self.device = device
-        self.prediction_type = scheduler.prediction_type
+        self.prediction_type = scheduler.config.prediction_type

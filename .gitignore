@@ -1,0 +1,17 @@
+**/.vscode/
+**/*.egg-info/
+**/data/
+**/outputs/
+*.bin
+*.ipynb_checkpoints
+*.o
+*.pkl
+*.pt
+*.pyc
+*.so
+/dist/
+__pycache__
+data/*
+poetry.lock
+*.swp
+*.tar

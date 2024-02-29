@@ -408,70 +408,81 @@ class SDSPipeline(StableDiffusionPipeline):
         )
 
         latents = target_z_T.clone()
+        z_0 = source_z_0.clone()
         latents.requires_grad = True
-        
-        # optimizer = torch.optim.SGD(
-        #     [latents], 
-        #     lr=self.lr,
-        #     weight_decay=self.weight_decay
-        # )
+
+        optimizer = torch.optim.SGD(
+            [latents], 
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
 
         # scheduler = torch.optim.lr_scheduler.StepLR(
         #     optimizer, 
         #     step_size=self.step_size,
         #     gamma=self.gamma
         # )
-        
+
         eps_fixed = torch.randn_like(source_z_0) if fix_source_noise else None
 
         num_warmup_steps = num_inference_steps - num_inference_steps * self.scheduler.order
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, timestep in enumerate(timesteps):
-                with torch.enable_grad():
-                    t = timestep.item()
-                    # optimizer.zero_grad()
+                t = timestep.item()
+                optimizer.zero_grad()
 
-                    z_t, eps, timestep = sds_loss.noise_input(source_z_0, timestep, eps_fixed)
+                z_t, eps, timestep = sds_loss.noise_input(z_0, timestep, eps_fixed)
 
-                    eps_pred, pred_z0 = sds_loss.get_epsilon_prediction(
-                        z_t,
-                        timestep=timestep,
-                        text_embeddings=prompt_embeds,
-                        alpha_bar_t=alphas_bar[t],
-                    )
-                    
-                    w = (1 - alphas_bar[t]).view(-1, 1, 1, 1)
+                eps_src_pred, pred_src_z0 = sds_loss.get_epsilon_prediction(
+                    z_t,
+                    timestep=timestep,
+                    text_embeddings=prompt_embeds,
+                    alpha_bar_t=alphas_bar[t],
+                )
 
-                    grad = w * (eps_pred - eps)
-
+                eps_tgt_pred, pred_tgt_z0 = sds_loss.get_epsilon_prediction(
+                    latents,
+                    timestep=timestep,
+                    text_embeddings=prompt_embeds,
+                    alpha_bar_t=alphas_bar[t],
+                )
                 
+                w = (1 - alphas_bar[t]).view(-1, 1, 1, 1)
+
+                grad = w * (eps_tgt_pred - eps_src_pred)
+                grad = torch.nan_to_num(grad)
+
+                with torch.enable_grad():
                     loss = latents * grad.clone()
                     loss = loss.sum() / (latents.shape[0] * latents.shape[1])
                     loss = loss * self.loss_weight
                     
-                    logger.info(f"Step {i+1}/{num_inference_steps} - Loss: {loss.item()}")
-                    
+                    logger.info(f"Step {i+1}/{num_inference_steps} - Loss: {loss.item()}")  
                     loss.backward(retain_graph=True)
                 
-                    # optimizer.step()
-                    # scheduler.step()
-                
-                    gradient = torch.autograd.grad(loss.requires_grad_(True), [latents], retain_graph=True)[0]
-                    latents = latents - self.lr * gradient
+                optimizer.step()
+                # scheduler.step()
+
+                # gradient = torch.autograd.grad(loss.requires_grad_(True), [z_0], retain_graph=True)[0]
+                # latents = latents - self.lr * z_0.grad
 
                 if i == num_inference_steps - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
-                        callback(i, t, latents)
+                        callback(i, timestep, latents)
 
                 if (i+1) % self.save_img_steps == 0:
-                    target_img = self.decode_latents(latents).squeeze()
+                    target_img = self.decode_latents(pred_tgt_z0).squeeze()
                     target_img = Image.fromarray((target_img * 255).astype(np.uint8))
+
+                    target_noisy_img = self.decode_latents(latents).squeeze()
+                    target_noisy_img = Image.fromarray((target_noisy_img * 255).astype(np.uint8))
 
                     if not os.path.exists(save_dir):
                         os.makedirs(save_dir)
-                    target_img.save(os.path.join(save_dir, f'{str(i).zfill(3)}.png'))
+                    target_img.save(os.path.join(save_dir, f'pred_{str(i).zfill(3)}.png'))
+                    target_noisy_img.save(os.path.join(save_dir, f'noisy_{str(i).zfill(3)}.png'))
 
         result = self.decode_latents(latents).squeeze()
         result = Image.fromarray((result * 255).astype(np.uint8))
@@ -499,7 +510,7 @@ class SDSPipeline(StableDiffusionPipeline):
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs = None,
         save_dir: Optional[str] = "./outputs",
-        verify: bool = True,
+        verify: bool = False,
     ):
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -598,8 +609,10 @@ class SDSPipeline(StableDiffusionPipeline):
                 dir_z_t = torch.sqrt(1. - alpha_bar_t) * noise_pred
                 latents = alpha_bar_t.sqrt() * pred_z_0 + dir_z_t
                 
-                if callback is not None and i % callback_steps == 0:
-                    callback(i, timestep, latents)
+                if i == num_inference_steps - 1 or ((i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        callback(i, timestep, latents)
                 
                 if (i+1) % self.save_img_steps == 0:
                     target_img = self.decode_latents(latents).squeeze()
@@ -654,9 +667,11 @@ class SDSPipeline(StableDiffusionPipeline):
                     dir_z_t = torch.sqrt(1. - alpha_bar_t_prev) * noise_pred
                     latents = alpha_bar_t_prev.sqrt() * pred_z_0 + dir_z_t
                     
-                    if callback is not None and i % callback_steps == 0:
-                        callback(i, timestep, latents)
-                    
+                    if i == num_inference_steps - 1 or ((i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+                        if callback is not None and i % callback_steps == 0:
+                            callback(i, timestep, latents)
+                        
                     if (i+1) % self.save_img_steps == 0:
                         target_img = self.decode_latents(latents).squeeze()
                         target_img = Image.fromarray((target_img * 255).astype(np.uint8))
