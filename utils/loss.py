@@ -13,13 +13,16 @@ class SDSLoss:
         z_t = self.scheduler.add_noise(z, eps, timestep)
         return z_t, eps, timestep
     
-    def get_epsilon_prediction(self, z_t, timestep, text_embeddings, alpha_bar_t, guidance_scale=7.5):
+    def get_epsilon_prediction(self, z_t, timestep, text_embeddings, alpha_bar_t, guidance_scale=7.5, cross_attention_kwargs=None):
         sigma_t = torch.sqrt(1 - alpha_bar_t).to(self.device)
         latent_input = torch.cat([z_t] * 2)
-        timestep = torch.cat([timestep] * 2)
-        embed = text_embeddings.permute(1, 0, 2, 3).reshape(-1, *text_embeddings.shape[2:])
 
-        e_t = self.unet(latent_input, timestep, embed).sample
+        e_t = self.unet(
+            latent_input, 
+            timestep, 
+            text_embeddings,
+            cross_attention_kwargs=cross_attention_kwargs
+        ).sample
 
         if self.prediction_type == 'v_prediction':
             e_t = torch.cat([alpha_bar_t] * 2) * e_t + torch.cat([sigma_t] * 2) * latent_input
