@@ -32,7 +32,7 @@ import numpy as np
 
 logger = logging.get_logger(__name__)
 
-class SDSPipeline(StableDiffusionPipeline):
+class DDSPipeline(StableDiffusionPipeline):
     def __init__(
         self,
         vae: AutoencoderKL,
@@ -137,35 +137,34 @@ class SDSPipeline(StableDiffusionPipeline):
 
     def _encode_prompt(
         self,
-        prompt: Union[str, List[str]],
+        source_prompt,
+        target_prompt,
         device,
         num_images_per_prompt,
         do_classifier_free_guidance,
         negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
+        source_prompt_embeds: Optional[torch.FloatTensor] = None,
+        target_prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
     ):
-        if prompt is not None and isinstance(prompt, str):
+        if source_prompt is not None and isinstance(source_prompt, str):
             batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
+        elif source_prompt is not None and isinstance(source_prompt, list):
+            batch_size = len(source_prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
-            
-        # Process prompt if not already embedded
-        if prompt_embeds is None:
+            batch_size = source_prompt_embeds.shape[0]
+
+        if source_prompt_embeds is None:
             text_inputs = self.tokenizer(
-                prompt,
+                source_prompt,
                 padding="max_length",
                 max_length=self.tokenizer.model_max_length,
                 truncation=True,
                 return_tensors="pt",
             )
             text_input_ids = text_inputs.input_ids
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-            
-            
-            # Handle sequence truncation, if necessary
+            untruncated_ids = self.tokenizer(source_prompt, padding="longest", return_tensors="pt").input_ids
+
             if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
                 text_input_ids, untruncated_ids
             ):
@@ -177,48 +176,77 @@ class SDSPipeline(StableDiffusionPipeline):
                     f" {self.tokenizer.model_max_length} tokens: {removed_text}"
                 )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
-                attention_mask = text_inputs.attention_mask.to(device)
-            else:
-                attention_mask = None
-
-            prompt_embeds = self.text_encoder(
-                text_input_ids.to(device),
-                attention_mask=attention_mask,
+        if target_prompt_embeds is None:
+            trg_text_inputs = self.tokenizer(
+                target_prompt,
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
             )
-            
-            prompt_embeds = prompt_embeds[0]
+            trg_text_input_ids = trg_text_inputs.input_ids
+            trg_untruncated_ids = self.tokenizer(target_prompt, padding="longest", return_tensors="pt").input_ids
 
-        prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
+            if trg_untruncated_ids.shape[-1] >= trg_text_input_ids.shape[-1] and not torch.equal(
+                trg_text_input_ids, trg_untruncated_ids
+            ):
+                removed_text = self.tokenizer.batch_decode(
+                    trg_untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
+                )
+                logger.warning(
+                    "The following part of your input was truncated because CLIP can only handle sequences up to"
+                    f" {self.tokenizer.model_max_length} tokens: {removed_text}"
+                )
 
-        bs_embed, seq_len, _ = prompt_embeds.shape
-        
-        # Duplicate text embeddings for each generation per prompt, using mps friendly method
-        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+            attention_mask = text_inputs.attention_mask.to(device)
+            trg_attention_mask = trg_text_inputs.attention_mask.to(device)
+        else:
+            attention_mask = None
+            trg_attention_mask = None
 
-        # Get unconditional embeddings for classifier free guidance
+        source_prompt_embeds = self.text_encoder(
+            text_input_ids.to(device),
+            attention_mask=attention_mask,
+        )
+        source_prompt_embeds = source_prompt_embeds[0]
+
+        target_prompt_embeds = self.text_encoder(
+            trg_text_input_ids.to(device),
+            attention_mask=trg_attention_mask,
+        )
+        target_prompt_embeds = target_prompt_embeds[0]
+
+        source_prompt_embeds = source_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
+        target_prompt_embeds = target_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
+
+        bs_embed, seq_len, _ = source_prompt_embeds.shape
+        # duplicate text embeddings for each generation per prompt, using mps friendly method
+        source_prompt_embeds = source_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        source_prompt_embeds = source_prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+        # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
             uncond_tokens: List[str]
             if negative_prompt is None:
                 uncond_tokens = [""] * batch_size
-            elif type(prompt) is not type(negative_prompt):
+            elif type(source_prompt) is not type(negative_prompt):
                 raise TypeError(
                     f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
+                    f" {type(source_prompt)}."
                 )
             elif isinstance(negative_prompt, str):
                 uncond_tokens = [negative_prompt]
             elif batch_size != len(negative_prompt):
                 raise ValueError(
                     f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
+                    f" {source_prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
                     " the batch size of `prompt`."
                 )
             else:
                 uncond_tokens = negative_prompt
 
-            max_length = prompt_embeds.shape[1]
+            max_length = source_prompt_embeds.shape[1]
             uncond_input = self.tokenizer(
                 uncond_tokens,
                 padding="max_length",
@@ -239,7 +267,7 @@ class SDSPipeline(StableDiffusionPipeline):
             negative_prompt_embeds = negative_prompt_embeds[0]
 
         if do_classifier_free_guidance:
-            # Duplicate unconditional embeddings for each generation per prompt, using mps friendly method
+            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = negative_prompt_embeds.shape[1]
 
             negative_prompt_embeds = negative_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
@@ -247,18 +275,13 @@ class SDSPipeline(StableDiffusionPipeline):
             negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
             negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-
-        return prompt_embeds
+        return source_prompt_embeds, target_prompt_embeds, negative_prompt_embeds
 
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, List[str]],
-        img: Optional[Union[torch.FloatTensor, Image.Image, np.ndarray]] = None,
+        source_prompt: Union[str, List[str]],
+        target_prompt: Optional[Union[str, List[str]]] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 200,
@@ -268,7 +291,10 @@ class SDSPipeline(StableDiffusionPipeline):
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         source_z_0: Optional[torch.FloatTensor] = None,
         target_z_T: Optional[torch.FloatTensor] = None,
+        source_img: Optional[Union[torch.FloatTensor, Image.Image, np.ndarray]] = None,
+        target_img: Optional[Union[torch.FloatTensor, Image.Image, np.ndarray]] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
+        target_prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
@@ -282,41 +308,41 @@ class SDSPipeline(StableDiffusionPipeline):
         
         # 1. Check inputs. Raise error if not valid
         self.check_inputs(
-            prompt, height, width, callback_steps,
+            source_prompt, height, width, callback_steps,
             negative_prompt, prompt_embeds, negative_prompt_embeds
         )
 
         # 2. Define call parameters
-        self.source_prompt = prompt
-        if prompt is not None and isinstance(prompt, str):
+        self.source_prompt = source_prompt
+        if source_prompt is not None and isinstance(source_prompt, str):
             batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
+        elif source_prompt is not None and isinstance(source_prompt, list):
+            batch_size = len(source_prompt)
         else:
             batch_size = prompt_embeds.shape[0]
 
         device = self._execution_device
         do_classifier_free_guidance = guidance_scale > 1.0
 
-
         # 3. Encode input prompt
-        prompt_embeds = self._encode_prompt(
-            prompt=prompt,
+        prompt_embeds, target_prompt_embeds, negative_prompt_embeds = self._encode_prompt(
+            source_prompt=source_prompt,
+            target_prompt=target_prompt if target_prompt is not None else source_prompt,
             device=device,
             num_images_per_prompt=num_images_per_prompt,
             do_classifier_free_guidance=do_classifier_free_guidance,
             negative_prompt=negative_prompt,
-            prompt_embeds=prompt_embeds,
+            source_prompt_embeds=prompt_embeds,
+            target_prompt_embeds=target_prompt_embeds if target_prompt is not None else prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds
         )
+        
+        # For classifier free guidance, we need to do two forward passes.
+        # Here we concatenate the unconditional and text embeddings into a single batch
+        # to avoid doing two forward passes
+        if do_classifier_free_guidance:
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
 
-        null_prompt_embeds = self._encode_prompt(
-            prompt="",
-            device=device,
-            num_images_per_prompt=num_images_per_prompt,
-            do_classifier_free_guidance=False,
-        )
- 
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps.to(device)
@@ -328,59 +354,47 @@ class SDSPipeline(StableDiffusionPipeline):
 
         # 5. Prepare latent variables
         if source_z_0 is None:
-            if img is None:
+            if source_img is None:
                 raise ValueError("You must provide either `source_img` or `source_z_0`.")
             # 3. Preprocess image
-            img = self.image_processor.preprocess(img)
+            source_img = self.image_processor.preprocess(source_img)
             source_z_0 = self.prepare_image_latents(
-                img,
+                source_img,
                 batch_size,
                 self.vae.dtype,
                 device,
                 generator,
             )
 
-        _, noises = self.invert(
-            prompt="",
-            prompt_embeds=null_prompt_embeds,
-            latents=source_z_0,
-            height=height, 
-            width=width, 
-            num_inference_steps=num_inference_steps, 
-            guidance_scale=1.0,
-            do_classifier_free_guidance=False,
-            num_images_per_prompt=num_images_per_prompt,
-            cache_noises=True,
-            save_dir=save_dir
-        )
-        
         # 5-1. Prepare target latents
         if target_z_T is not None:
             target_z_T = target_z_T.to(device)
-        else:
-            target_z_T = self.prepare_latents(
-                batch_size * num_images_per_prompt,
-                num_channels_latents,
-                height,
-                width,
-                prompt_embeds.dtype,
-                device,
-                generator,
-                latents,
-            )
 
-        target_z_0, _ = self.ddim_forward(
-            latents=target_z_T,
-            prompt_embeds=null_prompt_embeds,
-            num_inference_steps=num_inference_steps,
-            timesteps=timesteps,
-            guidance_scale=1.0,
-            do_classifier_free_guidance=False,
-            backward=True,
-            cache_noises=False,
-            save_dir=save_dir,
-            device=device
-        )
+            # scale the initial noise by the standard deviation required by the scheduler
+            target_z_T = target_z_T * self.scheduler.init_noise_sigma
+        else:
+            invert = partial(self.invert, 
+                            height=height, 
+                            width=width, 
+                            num_inference_steps=num_inference_steps, 
+                            guidance_scale=guidance_scale,
+                            negative_prompt=negative_prompt,
+                            num_images_per_prompt=num_images_per_prompt,
+                            save_dir=save_dir
+                            )
+            if target_img is None:
+                logger.warning("No target image or latents provided. Using source latents as target latents.")
+                target_z_T = invert(
+                    prompt="",
+                    img=source_img,
+                    latents=source_z_0,
+                )
+            else:
+                target_img = self.image_processor.preprocess(target_img)
+                target_z_T = invert(
+                    prompt="",
+                    img=target_img,
+                )
 
         self.unet = prepare_unet(self.unet)
 
@@ -393,7 +407,8 @@ class SDSPipeline(StableDiffusionPipeline):
             scheduler=self.scheduler
         )
 
-        latents = target_z_0.clone()
+        latents = target_z_T.clone()
+        z_0 = source_z_0.clone()
         latents.requires_grad = True
 
         optimizer = torch.optim.SGD(
@@ -402,6 +417,14 @@ class SDSPipeline(StableDiffusionPipeline):
             weight_decay=self.weight_decay
         )
 
+        # scheduler = torch.optim.lr_scheduler.StepLR(
+        #     optimizer, 
+        #     step_size=self.step_size,
+        #     gamma=self.gamma
+        # )
+
+        eps_fixed = torch.randn_like(source_z_0) if fix_source_noise else None
+
         num_warmup_steps = num_inference_steps - num_inference_steps * self.scheduler.order
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -409,10 +432,17 @@ class SDSPipeline(StableDiffusionPipeline):
                 t = timestep.item()
                 optimizer.zero_grad()
 
-                z_t, eps, timestep = sds_loss.noise_input(latents, timestep, noises[t])
+                z_t, eps, timestep = sds_loss.noise_input(z_0, timestep, eps_fixed)
 
-                eps_pred, pred_z0 = sds_loss.get_epsilon_prediction(
+                eps_src_pred, pred_src_z0 = sds_loss.get_epsilon_prediction(
                     z_t,
+                    timestep=timestep,
+                    text_embeddings=prompt_embeds,
+                    alpha_bar_t=alphas_bar[t],
+                )
+
+                eps_tgt_pred, pred_tgt_z0 = sds_loss.get_epsilon_prediction(
+                    latents,
                     timestep=timestep,
                     text_embeddings=prompt_embeds,
                     alpha_bar_t=alphas_bar[t],
@@ -420,7 +450,7 @@ class SDSPipeline(StableDiffusionPipeline):
                 
                 w = (1 - alphas_bar[t]).view(-1, 1, 1, 1)
 
-                grad = w * (eps_pred - eps)
+                grad = w * (eps_tgt_pred - eps_src_pred)
                 grad = torch.nan_to_num(grad)
 
                 with torch.enable_grad():
@@ -432,6 +462,10 @@ class SDSPipeline(StableDiffusionPipeline):
                     loss.backward(retain_graph=True)
                 
                 optimizer.step()
+                # scheduler.step()
+
+                # gradient = torch.autograd.grad(loss.requires_grad_(True), [z_0], retain_graph=True)[0]
+                # latents = latents - self.lr * z_0.grad
 
                 if i == num_inference_steps - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
@@ -439,13 +473,16 @@ class SDSPipeline(StableDiffusionPipeline):
                         callback(i, timestep, latents)
 
                 if (i+1) % self.save_img_steps == 0:
-                    img = self.decode_latents(latents).squeeze()
-                    img = Image.fromarray((img * 255).astype(np.uint8))
+                    target_img = self.decode_latents(pred_tgt_z0).squeeze()
+                    target_img = Image.fromarray((target_img * 255).astype(np.uint8))
+
+                    target_noisy_img = self.decode_latents(latents).squeeze()
+                    target_noisy_img = Image.fromarray((target_noisy_img * 255).astype(np.uint8))
 
                     if not os.path.exists(save_dir):
                         os.makedirs(save_dir)
-
-                    img.save(os.path.join(save_dir, 'results', f'{str(i).zfill(3)}.png'))
+                    target_img.save(os.path.join(save_dir, f'pred_{str(i).zfill(3)}.png'))
+                    target_noisy_img.save(os.path.join(save_dir, f'noisy_{str(i).zfill(3)}.png'))
 
         result = self.decode_latents(latents).squeeze()
         result = Image.fromarray((result * 255).astype(np.uint8))
@@ -462,10 +499,10 @@ class SDSPipeline(StableDiffusionPipeline):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 200,
-        guidance_scale: float = 1.0,
+        guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
-        forward_iter_stop: Optional[int] = None,
+        iter_stop: Optional[int] = None,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
@@ -473,8 +510,7 @@ class SDSPipeline(StableDiffusionPipeline):
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs = None,
         save_dir: Optional[str] = "./outputs",
-        verify: bool = True,
-        cache_noises: bool = False,
+        verify: bool = False,
     ):
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -499,16 +535,24 @@ class SDSPipeline(StableDiffusionPipeline):
         do_classifier_free_guidance = guidance_scale > 1.0
 
         # 3. Encode input prompt
-        prompt_embeds = self._encode_prompt(
-            prompt=prompt,
+        prompt_embeds, _, negative_prompt_embeds = self._encode_prompt(
+            prompt,
+            target_prompt=prompt,
             device=device,
             num_images_per_prompt=num_images_per_prompt,
             do_classifier_free_guidance=do_classifier_free_guidance,
             negative_prompt=negative_prompt,
-            prompt_embeds=prompt_embeds,
+            source_prompt_embeds=prompt_embeds,
+            target_prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds
         )
         
+        # For classifier free guidance, we need to do two forward passes.
+        # Here we concatenate the unconditional and text embeddings into a single batch
+        # to avoid doing two forward passes
+        if do_classifier_free_guidance:
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps)
         timesteps = self.scheduler.timesteps
@@ -526,71 +570,9 @@ class SDSPipeline(StableDiffusionPipeline):
             )
         latents = latents.to(self.device)
         # latents = latents * self.scheduler.init_noise_sigma
-
-        ddim_process = partial(
-            self.ddim_forward,
-            prompt_embeds=prompt_embeds,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            do_classifier_free_guidance=do_classifier_free_guidance,
-            timesteps=timesteps,
-            forward_iter_stop=forward_iter_stop,
-            save_dir=save_dir,
-            device=device,
-            callback=callback,
-            callback_steps=callback_steps,
-            cross_attention_kwargs=cross_attention_kwargs
-        )
         
-        latents, noises = ddim_process(
-            latents=latents,
-            backward=False,
-            cache_noises=cache_noises
-        )
-                
-        inverted_latents = latents.clone()
-                
-        if verify:
-            logger.info("Verifying the result...")
-            ddim_process(
-                latents=inverted_latents,
-                backward=True,
-                cache_noises=False
-            )
-        return inverted_latents, noises
-    
-
-    def ddim_forward(
-            self,
-            latents: torch.FloatTensor,
-            prompt_embeds: torch.FloatTensor,
-            num_inference_steps: int,
-            timesteps: torch.Tensor,
-            guidance_scale: float = 1.0,
-            do_classifier_free_guidance: bool = False,
-            backward: bool = False,
-            cache_noises: bool = False,
-            save_dir: Optional[str] = "./outputs",
-            forward_iter_stop: Optional[int] = None,
-            device: Optional[torch.device] = None,
-            callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-            callback_steps: Optional[int] = 1,
-            cross_attention_kwargs = None,
-        ):
-
-        noises = {}
-        t_steps = timesteps.clone()
-
-        save_dir = os.path.join(save_dir, 'forward') if not backward else os.path.join(save_dir, 'backward')
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-
-        if forward_iter_stop:
-            t_steps = t_steps[num_inference_steps - forward_iter_stop:]
-            num_inference_steps = forward_iter_stop
-
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, timestep in enumerate(reversed(t_steps) if not backward else t_steps):
+            for i, timestep in enumerate(reversed(timesteps)):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = (
                     torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -612,9 +594,6 @@ class SDSPipeline(StableDiffusionPipeline):
                         noise_pred_text - noise_pred_uncond
                     )
 
-                if cache_noises:
-                    noises[timestep.item()] = noise_pred
-
                 prev_timestep = (
                     timestep - self.num_train_timesteps // num_inference_steps
                 )
@@ -626,12 +605,9 @@ class SDSPipeline(StableDiffusionPipeline):
                     else self.scheduler.final_alpha_cumprod
                 ).to(device)
                 
-                if not backward:
-                    alpha_bar_t, alpha_bar_t_prev = alpha_bar_t_prev, alpha_bar_t
-
-                pred_z_0 = (latents - torch.sqrt(1 - alpha_bar_t) * noise_pred) / torch.sqrt(alpha_bar_t)
-                dir_z_t = torch.sqrt(1. - alpha_bar_t_prev) * noise_pred
-                latents = alpha_bar_t_prev.sqrt() * pred_z_0 + dir_z_t
+                pred_z_0 = (latents - torch.sqrt(1 - alpha_bar_t_prev) * noise_pred) / torch.sqrt(alpha_bar_t_prev)
+                dir_z_t = torch.sqrt(1. - alpha_bar_t) * noise_pred
+                latents = alpha_bar_t.sqrt() * pred_z_0 + dir_z_t
                 
                 if i == num_inference_steps - 1 or ((i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
@@ -642,10 +618,66 @@ class SDSPipeline(StableDiffusionPipeline):
                     target_img = self.decode_latents(latents).squeeze()
                     target_img = Image.fromarray((target_img * 255).astype(np.uint8))
 
-                    iter_num = str(i).zfill(3) if not backward else str(num_inference_steps - i - 1).zfill(3)
-                    target_img.save(os.path.join(save_dir, f'{"forward" if not backward else "backward"}_{iter_num}.png'))
+                    if not os.path.exists(save_dir):
+                        os.makedirs(save_dir)
+                    target_img.save(os.path.join(save_dir, f'forward_{str(i).zfill(3)}.png'))
                 
-                if forward_iter_stop is not None and i == (forward_iter_stop - 1):
+                if iter_stop is not None and i == iter_stop:
                     break
+                
+        inverted_latents = latents.clone()
+                
+        if verify:
+            logger.info("Verifying the result...")
+            with self.progress_bar(total=num_inference_steps) as progress_bar:
+                for i, timestep in enumerate(timesteps[num_inference_steps - iter_stop - 1:] if iter_stop is not None else timesteps):
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = (
+                        torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                    )
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, timestep)
 
-        return latents, noises
+                    # predict the noise residual
+                    noise_pred = self.unet(
+                        latent_model_input, 
+                        timestep,
+                        prompt_embeds,
+                        cross_attention_kwargs=cross_attention_kwargs
+                    ).sample
+
+                    # perform guidance
+                    if do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + guidance_scale * (
+                            noise_pred_text - noise_pred_uncond
+                        )
+
+                    prev_timestep = (
+                        timestep - self.num_train_timesteps // num_inference_steps
+                    )
+
+                    alpha_bar_t = self.scheduler.alphas_cumprod[timestep].to(device)
+                    alpha_bar_t_prev = (
+                        self.scheduler.alphas_cumprod[prev_timestep]
+                        if prev_timestep >= 0
+                        else self.scheduler.final_alpha_cumprod
+                    ).to(device)
+                    
+                    pred_z_0 = (latents - torch.sqrt(1 - alpha_bar_t) * noise_pred) / torch.sqrt(alpha_bar_t)
+                    dir_z_t = torch.sqrt(1. - alpha_bar_t_prev) * noise_pred
+                    latents = alpha_bar_t_prev.sqrt() * pred_z_0 + dir_z_t
+                    
+                    if i == num_inference_steps - 1 or ((i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+                        if callback is not None and i % callback_steps == 0:
+                            callback(i, timestep, latents)
+                        
+                    if (i+1) % self.save_img_steps == 0:
+                        target_img = self.decode_latents(latents).squeeze()
+                        target_img = Image.fromarray((target_img * 255).astype(np.uint8))
+
+                        if not os.path.exists(save_dir):
+                            os.makedirs(save_dir)
+                        target_img.save(os.path.join(save_dir, f'backward_{str(num_inference_steps - i - 1).zfill(3)}.png'))
+            
+        return inverted_latents

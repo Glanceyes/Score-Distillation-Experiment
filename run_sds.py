@@ -12,18 +12,14 @@ import numpy as np
 
 def run_by_img(
     pipeline: SDSPipeline,
-    source_img: Union[torch.FloatTensor, Image.Image, np.ndarray],
-    source_prompt: str,
-    source_img_path: str,
-    target_img: Union[torch.FloatTensor, Image.Image, np.ndarray] = None,
-    target_prompt: str = None,
-    target_img_path: str = None,
+    img: Union[torch.FloatTensor, Image.Image, np.ndarray],
+    prompt: str,
+    img_path: str,
     num_inference_steps: int = 200,
     guidance_scale: float = 7.5,
     negative_prompt: Optional[Union[str, List[str]]] = None,
     num_images_per_prompt: int = 1,
     generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-    fix_source_noise: bool = False,
     save_dir: str = "./outputs",
 ):
     
@@ -31,20 +27,17 @@ def run_by_img(
         os.makedirs(save_dir)
     
     result = pipeline(
-        source_prompt=source_prompt,
-        target_prompt=target_prompt,
+        prompt=prompt,
+        img=img,
         num_inference_steps= num_inference_steps,
         guidance_scale=guidance_scale,
         negative_prompt=negative_prompt,
         num_images_per_prompt=num_images_per_prompt,
         generator=generator,
-        source_img=source_img,
-        target_img=target_img,
-        fix_source_noise=fix_source_noise,
         save_dir=save_dir
     )
     
-    result.save(os.path.join(save_dir, f"{source_img_path.split('/')[-1].split('.')[0]}_to_{target_img_path.split('/')[-1].split('.')[0]}.png"))
+    result.save(os.path.join(save_dir, f"{img_path.split('/')[-1].split('.')[0]}_by_SDS.png"))
 
     return result
 
@@ -91,12 +84,9 @@ def main():
     
     run_by_img(
         pipeline=pipeline,
-        source_img=source_img,
-        source_prompt=source_prompt,
-        target_img=target_img,
-        target_prompt=target_prompt,
-        source_img_path=source_img_path,
-        target_img_path=target_img_path,
+        img=source_img,
+        prompt=source_prompt,
+        img_path=source_img_path,
         num_inference_steps=args.n_steps,
         generator=generator,
         fix_source_noise=args.fix_source_noise,
