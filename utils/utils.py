@@ -1,6 +1,7 @@
 from PIL import Image
 from pipeline_dds import DDSPipeline
 from pipeline_sds import SDSPipeline
+from diffusers.pipelines import StableDiffusionPipeline
 from diffusers.schedulers import DDIMScheduler
 from transformers import BlipForConditionalGeneration, BlipProcessor
 
@@ -12,7 +13,7 @@ def load_image(image_path, h=512, w=512):
     
     return image
 
-def load_model(args, pipeline_type='sds'):
+def load_model(args, pipeline_type=None):
     if args.v2_1:
         sd_version = "stabilityai/stable-diffusion-2-1-base"
     else:
@@ -46,6 +47,15 @@ def load_model(args, pipeline_type='sds'):
             safety_checker=None,
             opt=opt
         )
+    else:
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            sd_version, 
+            torch_dtype=weight_dtype,
+            safety_checker=None,
+        )
     
-    pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+    if pipeline_type is not None:
+        pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+        pipeline.scheduler.config.steps_offset = 0
+
     return pipeline

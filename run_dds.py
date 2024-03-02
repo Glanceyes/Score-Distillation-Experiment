@@ -71,7 +71,7 @@ def main():
     args = parser.parse_args()
     
     device = torch.device(f'cuda:{args.cuda}') if torch.cuda.is_available() else torch.device('cpu')
-    pipeline = load_model(args).to(device)
+    pipeline = load_model(args, pipeline_type='dds').to(device)
     generator = torch.Generator(device).manual_seed(args.seed)
     
     source_img_path = args.source_img_path

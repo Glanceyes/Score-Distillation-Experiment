@@ -140,8 +140,8 @@ class SDSPipeline(StableDiffusionPipeline):
         prompt: Union[str, List[str]],
         device,
         num_images_per_prompt,
-        do_classifier_free_guidance,
-        negative_prompt=None,
+        do_classifier_free_guidance: Optional[bool] = False,
+        negative_prompt: Optional[str] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
     ):
@@ -272,8 +272,8 @@ class SDSPipeline(StableDiffusionPipeline):
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
-        fix_source_noise: bool = False,
         save_dir: Optional[str] = "./outputs",
+        save_noises: bool = False,
     ):
         
         # 0. Default height and width to unet
@@ -287,7 +287,6 @@ class SDSPipeline(StableDiffusionPipeline):
         )
 
         # 2. Define call parameters
-        self.source_prompt = prompt
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
@@ -342,15 +341,14 @@ class SDSPipeline(StableDiffusionPipeline):
 
         _, noises = self.invert(
             prompt="",
-            prompt_embeds=null_prompt_embeds,
             latents=source_z_0,
             height=height, 
             width=width, 
             num_inference_steps=num_inference_steps, 
             guidance_scale=1.0,
-            do_classifier_free_guidance=False,
             num_images_per_prompt=num_images_per_prompt,
             cache_noises=True,
+            save_noises=save_noises,
             save_dir=save_dir
         )
         
@@ -366,21 +364,26 @@ class SDSPipeline(StableDiffusionPipeline):
                 prompt_embeds.dtype,
                 device,
                 generator,
-                latents,
             )
 
-        target_z_0, _ = self.ddim_forward(
+        target_z_0, _ = self.ddim_backward(
             latents=target_z_T,
             prompt_embeds=null_prompt_embeds,
             num_inference_steps=num_inference_steps,
             timesteps=timesteps,
             guidance_scale=1.0,
-            do_classifier_free_guidance=False,
-            backward=True,
             cache_noises=False,
-            save_dir=save_dir,
+            save_dir=os.path.join(save_dir, 'target'),
             device=device
         )
+
+        target_img_save_dir = os.path.join(save_dir, 'results')
+        if not os.path.exists(target_img_save_dir):
+            os.makedirs(target_img_save_dir)
+
+        target_img = self.decode_latents(target_z_0).squeeze()
+        target_img = Image.fromarray((target_img * 255).astype(np.uint8))
+        target_img.save(os.path.join(target_img_save_dir, 'target_0.png'))
 
         self.unet = prepare_unet(self.unet)
 
@@ -442,10 +445,7 @@ class SDSPipeline(StableDiffusionPipeline):
                     img = self.decode_latents(latents).squeeze()
                     img = Image.fromarray((img * 255).astype(np.uint8))
 
-                    if not os.path.exists(save_dir):
-                        os.makedirs(save_dir)
-
-                    img.save(os.path.join(save_dir, 'results', f'{str(i).zfill(3)}.png'))
+                    img.save(os.path.join(target_img_save_dir, f'target_{str(i).zfill(3)}.png'))
 
         result = self.decode_latents(latents).squeeze()
         result = Image.fromarray((result * 255).astype(np.uint8))
@@ -475,6 +475,7 @@ class SDSPipeline(StableDiffusionPipeline):
         save_dir: Optional[str] = "./outputs",
         verify: bool = True,
         cache_noises: bool = False,
+        save_noises: bool = False,
     ):
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -487,7 +488,6 @@ class SDSPipeline(StableDiffusionPipeline):
         )
 
         # 2. Define call parameters
-        self.source_prompt = prompt
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
@@ -527,36 +527,42 @@ class SDSPipeline(StableDiffusionPipeline):
         latents = latents.to(self.device)
         # latents = latents * self.scheduler.init_noise_sigma
 
-        ddim_process = partial(
-            self.ddim_forward,
+        latents, noises = self.ddim_forward(
+            latents=latents,
             prompt_embeds=prompt_embeds,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
-            do_classifier_free_guidance=do_classifier_free_guidance,
             timesteps=timesteps,
             forward_iter_stop=forward_iter_stop,
-            save_dir=save_dir,
+            save_dir=os.path.join(save_dir, 'forward'),
             device=device,
             callback=callback,
             callback_steps=callback_steps,
-            cross_attention_kwargs=cross_attention_kwargs
-        )
-        
-        latents, noises = ddim_process(
-            latents=latents,
-            backward=False,
-            cache_noises=cache_noises
+            cross_attention_kwargs=cross_attention_kwargs,
+            cache_noises=cache_noises,
+            save_noises=save_noises
         )
                 
         inverted_latents = latents.clone()
                 
         if verify:
             logger.info("Verifying the result...")
-            ddim_process(
+            self.ddim_backward(
                 latents=inverted_latents,
-                backward=True,
-                cache_noises=False
+                prompt_embeds=prompt_embeds,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                timesteps=timesteps,
+                forward_iter_stop=forward_iter_stop,
+                save_dir=os.path.join(save_dir, 'verify'),
+                device=device,
+                callback=callback,
+                callback_steps=callback_steps,
+                cross_attention_kwargs=cross_attention_kwargs,
+                cache_noises=False,
+                save_noises=False,
             )
+
         return inverted_latents, noises
     
 
@@ -567,9 +573,8 @@ class SDSPipeline(StableDiffusionPipeline):
             num_inference_steps: int,
             timesteps: torch.Tensor,
             guidance_scale: float = 1.0,
-            do_classifier_free_guidance: bool = False,
-            backward: bool = False,
             cache_noises: bool = False,
+            save_noises: bool = False,
             save_dir: Optional[str] = "./outputs",
             forward_iter_stop: Optional[int] = None,
             device: Optional[torch.device] = None,
@@ -581,16 +586,25 @@ class SDSPipeline(StableDiffusionPipeline):
         noises = {}
         t_steps = timesteps.clone()
 
-        save_dir = os.path.join(save_dir, 'forward') if not backward else os.path.join(save_dir, 'backward')
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        if cache_noises and save_noises:
+            noise_save_dir = os.path.join(save_dir, 'noises')
+            if not os.path.exists(noise_save_dir):
+                os.makedirs(noise_save_dir)
+
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
 
-        if forward_iter_stop:
-            t_steps = t_steps[num_inference_steps - forward_iter_stop:]
-            num_inference_steps = forward_iter_stop
+        t_steps = reversed(t_steps)
 
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, timestep in enumerate(reversed(t_steps) if not backward else t_steps):
+        if forward_iter_stop is None:
+            forward_iter_stop = num_inference_steps
+
+        with self.progress_bar(total=forward_iter_stop - 1) as progress_bar:
+            for i in range(1, forward_iter_stop):
+                timestep = t_steps[i]
+
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = (
                     torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -615,19 +629,114 @@ class SDSPipeline(StableDiffusionPipeline):
                 if cache_noises:
                     noises[timestep.item()] = noise_pred
 
-                prev_timestep = (
-                    timestep - self.num_train_timesteps // num_inference_steps
-                )
+                    if save_noises:
+                        torch.save(noise_pred, os.path.join(noise_save_dir, f'noise_{str(i).zfill(3)}.pt'))
 
-                alpha_bar_t = self.scheduler.alphas_cumprod[timestep].to(device)
-                alpha_bar_t_prev = (
-                    self.scheduler.alphas_cumprod[prev_timestep]
-                    if prev_timestep >= 0
-                    else self.scheduler.final_alpha_cumprod
-                ).to(device)
+                        noise_img = self.decode_latents(noise_pred).squeeze()
+                        noise_img = Image.fromarray((noise_img * 255).astype(np.uint8))
+                        noise_img.save(os.path.join(noise_save_dir, f'noise_{str(i).zfill(3)}.png'))
+
+                t = timestep.item()
+                prev_t = max(0, t - self.num_train_timesteps // num_inference_steps)
+
+                alpha_bar_t = self.scheduler.alphas_cumprod[t].to(device)
+                alpha_bar_t_prev = self.scheduler.alphas_cumprod[prev_t].to(device)
+
+                pred_z_0 = (latents - torch.sqrt(1 - alpha_bar_t_prev) * noise_pred) / torch.sqrt(alpha_bar_t_prev)
+                dir_z_t = torch.sqrt(1. - alpha_bar_t) * noise_pred
+                latents = alpha_bar_t.sqrt() * pred_z_0 + dir_z_t
                 
-                if not backward:
-                    alpha_bar_t, alpha_bar_t_prev = alpha_bar_t_prev, alpha_bar_t
+                if i == num_inference_steps - 1 or ((i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        callback(i, timestep, latents)
+                
+                if (i+1) % self.save_img_steps == 0:
+                    target_img = self.decode_latents(latents).squeeze()
+                    target_img = Image.fromarray((target_img * 255).astype(np.uint8))
+
+                    iter_num = str(t).zfill(3)
+                    target_img.save(os.path.join(save_dir, f'forward_{iter_num}.png'))
+                
+                if forward_iter_stop is not None and i == (forward_iter_stop - 1):
+                    break
+
+        return latents, noises
+    
+
+    def ddim_backward(
+            self,
+            latents: torch.FloatTensor,
+            prompt_embeds: torch.FloatTensor,
+            num_inference_steps: int,
+            timesteps: torch.Tensor,
+            guidance_scale: float = 1.0,
+            cache_noises: bool = False,
+            save_noises: bool = False,
+            save_dir: Optional[str] = "./outputs",
+            forward_iter_stop: Optional[int] = None,
+            device: Optional[torch.device] = None,
+            callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+            callback_steps: Optional[int] = 1,
+            cross_attention_kwargs = None,
+        ):
+
+        noises = {}
+        t_steps = timesteps.clone()
+
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        if cache_noises and save_noises:
+            noise_save_dir = os.path.join(save_dir, 'noises')
+            if not os.path.exists(noise_save_dir):
+                os.makedirs(noise_save_dir)
+
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        if forward_iter_stop is None:
+            forward_iter_stop = num_inference_steps
+
+        with self.progress_bar(total=forward_iter_stop) as progress_bar:
+            for i in range(num_inference_steps - forward_iter_stop, num_inference_steps):        
+                timestep = t_steps[i]
+
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = (
+                    torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                )
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, timestep)
+
+                # predict the noise residual
+                noise_pred = self.unet(
+                    latent_model_input, 
+                    timestep,
+                    prompt_embeds,
+                    cross_attention_kwargs=cross_attention_kwargs
+                ).sample
+
+                # perform guidance
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
+
+                if cache_noises:
+                    noises[timestep.item()] = noise_pred
+
+                    if save_noises:
+                        torch.save(noise_pred, os.path.join(noise_save_dir, f'noise_{str(i).zfill(3)}.pt'))
+
+                        noise_img = self.decode_latents(noise_pred).squeeze()
+                        noise_img = Image.fromarray((noise_img * 255).astype(np.uint8))
+                        noise_img.save(os.path.join(noise_save_dir, f'noise_{str(i).zfill(3)}.png'))
+
+                t = timestep.item()
+                prev_t = max(1, t - self.num_train_timesteps // num_inference_steps)
+
+                alpha_bar_t = self.scheduler.alphas_cumprod[t].to(device)
+                alpha_bar_t_prev = self.scheduler.alphas_cumprod[prev_t].to(device)
 
                 pred_z_0 = (latents - torch.sqrt(1 - alpha_bar_t) * noise_pred) / torch.sqrt(alpha_bar_t)
                 dir_z_t = torch.sqrt(1. - alpha_bar_t_prev) * noise_pred
@@ -642,8 +751,8 @@ class SDSPipeline(StableDiffusionPipeline):
                     target_img = self.decode_latents(latents).squeeze()
                     target_img = Image.fromarray((target_img * 255).astype(np.uint8))
 
-                    iter_num = str(i).zfill(3) if not backward else str(num_inference_steps - i - 1).zfill(3)
-                    target_img.save(os.path.join(save_dir, f'{"forward" if not backward else "backward"}_{iter_num}.png'))
+                    iter_num = str(t).zfill(3)
+                    target_img.save(os.path.join(save_dir, f'backward_{iter_num}.png'))
                 
                 if forward_iter_stop is not None and i == (forward_iter_stop - 1):
                     break

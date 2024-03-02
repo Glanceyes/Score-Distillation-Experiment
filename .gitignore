@@ -3,6 +3,7 @@
 **/data/
 **/outputs/
 *.bin
+*.gitignore
 *.ipynb_checkpoints
 *.o
 *.pkl
