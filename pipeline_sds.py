@@ -12,6 +12,8 @@ from typing import *
 from PIL import Image
 from dataclasses import dataclass
 from functools import partial
+from jaxtyping import Float
+from torch import Tensor
 
 from transformers import (
     BlipForConditionalGeneration,
@@ -253,6 +255,18 @@ class SDSPipeline(StableDiffusionPipeline):
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
 
         return prompt_embeds
+    
+    def perpendicular_component(self, x: Float[Tensor, "B C H W"], y: Float[Tensor, "B C H W"]):
+        # get the component of x that is perpendicular to y
+        eps = torch.ones_like(x[:, 0, 0, 0]) * 1e-6
+        return (
+            x
+            - (
+                torch.mul(x, y).sum(dim=[1, 2, 3])
+                / torch.maximum(torch.mul(y, y).sum(dim=[1, 2, 3]), eps)
+            ).view(-1, 1, 1, 1)
+            * y
+        )
 
     @torch.no_grad()
     def __call__(
@@ -262,6 +276,7 @@ class SDSPipeline(StableDiffusionPipeline):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 200,
+        num_iter_per_timestep: int = 1,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
@@ -274,6 +289,7 @@ class SDSPipeline(StableDiffusionPipeline):
         callback_steps: Optional[int] = 1,
         save_dir: Optional[str] = "./outputs",
         save_noises: bool = False,
+        use_perpendicular: bool = False,
     ):
         
         # 0. Default height and width to unet
@@ -383,7 +399,7 @@ class SDSPipeline(StableDiffusionPipeline):
 
         target_img = self.decode_latents(target_z_0).squeeze()
         target_img = Image.fromarray((target_img * 255).astype(np.uint8))
-        target_img.save(os.path.join(target_img_save_dir, 'target_0.png'))
+        target_img.save(os.path.join(target_img_save_dir, f'target_{self.num_train_timesteps}.png'))
 
         self.unet = prepare_unet(self.unet)
 
@@ -409,43 +425,50 @@ class SDSPipeline(StableDiffusionPipeline):
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, timestep in enumerate(timesteps):
+                if timestep.item() >= self.num_train_timesteps:
+                    timestep = torch.tensor(self.num_train_timesteps - 1, device=device)
                 t = timestep.item()
-                optimizer.zero_grad()
 
-                z_t, eps, timestep = sds_loss.noise_input(latents, timestep, noises[t])
+                for j in range(num_iter_per_timestep):
+                    optimizer.zero_grad()
 
-                eps_pred, pred_z0 = sds_loss.get_epsilon_prediction(
-                    z_t,
-                    timestep=timestep,
-                    text_embeddings=prompt_embeds,
-                    alpha_bar_t=alphas_bar[t],
-                )
-                
-                w = (1 - alphas_bar[t]).view(-1, 1, 1, 1)
+                    z_t, eps, timestep = sds_loss.noise_input(latents, timestep, noises[t])
 
-                grad = w * (eps_pred - eps)
-                grad = torch.nan_to_num(grad)
-
-                with torch.enable_grad():
-                    loss = latents * grad.clone()
-                    loss = loss.sum() / (latents.shape[0] * latents.shape[1])
-                    loss = loss * self.loss_weight
+                    eps_pred, pred_z0 = sds_loss.get_epsilon_prediction(
+                        z_t,
+                        timestep=timestep,
+                        text_embeddings=prompt_embeds,
+                        alpha_bar_t=alphas_bar[t],
+                    )
                     
-                    logger.info(f"Step {i+1}/{num_inference_steps} - Loss: {loss.item()}")  
-                    loss.backward(retain_graph=True)
-                
-                optimizer.step()
+                    w = (1 - alphas_bar[t]).view(-1, 1, 1, 1)
 
-                if i == num_inference_steps - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        callback(i, timestep, latents)
+                    if use_perpendicular:
+                        grad = w * self.perpendicular_component(eps_pred - eps, eps_pred)
+                    else:
+                        grad = w * (eps_pred - eps)
+                    grad = torch.nan_to_num(grad)
+
+                    with torch.enable_grad():
+                        loss = latents * grad.clone()
+                        loss = loss.sum() / (latents.shape[0] * latents.shape[1])
+                        loss = loss * self.loss_weight
+                        
+                        logger.info(f"Step {i+1}/{num_inference_steps} - Loss: {loss.item()}")  
+                        loss.backward(retain_graph=True)
+                    
+                    optimizer.step()
+
+                    if i == num_inference_steps - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+                        if callback is not None and i % callback_steps == 0:
+                            callback(i, timestep, latents)
 
                 if (i+1) % self.save_img_steps == 0:
                     img = self.decode_latents(latents).squeeze()
                     img = Image.fromarray((img * 255).astype(np.uint8))
 
-                    img.save(os.path.join(target_img_save_dir, f'target_{str(i).zfill(3)}.png'))
+                    img.save(os.path.join(target_img_save_dir, f'target_{str(t).zfill(3)}.png'))
 
         result = self.decode_latents(latents).squeeze()
         result = Image.fromarray((result * 255).astype(np.uint8))
@@ -473,7 +496,7 @@ class SDSPipeline(StableDiffusionPipeline):
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs = None,
         save_dir: Optional[str] = "./outputs",
-        verify: bool = True,
+        verify: bool = False,
         cache_noises: bool = False,
         save_noises: bool = False,
     ):
@@ -601,8 +624,8 @@ class SDSPipeline(StableDiffusionPipeline):
         if forward_iter_stop is None:
             forward_iter_stop = num_inference_steps
 
-        with self.progress_bar(total=forward_iter_stop - 1) as progress_bar:
-            for i in range(1, forward_iter_stop):
+        with self.progress_bar(total=forward_iter_stop) as progress_bar:
+            for i in range(forward_iter_stop):
                 timestep = t_steps[i]
 
                 # expand the latents if we are doing classifier free guidance
@@ -637,6 +660,7 @@ class SDSPipeline(StableDiffusionPipeline):
                         noise_img.save(os.path.join(noise_save_dir, f'noise_{str(i).zfill(3)}.png'))
 
                 t = timestep.item()
+                t = min(t, self.num_train_timesteps - 1)
                 prev_t = max(0, t - self.num_train_timesteps // num_inference_steps)
 
                 alpha_bar_t = self.scheduler.alphas_cumprod[t].to(device)
@@ -733,6 +757,7 @@ class SDSPipeline(StableDiffusionPipeline):
                         noise_img.save(os.path.join(noise_save_dir, f'noise_{str(i).zfill(3)}.png'))
 
                 t = timestep.item()
+                t = min(t, self.num_train_timesteps - 1)
                 prev_t = max(1, t - self.num_train_timesteps // num_inference_steps)
 
                 alpha_bar_t = self.scheduler.alphas_cumprod[t].to(device)

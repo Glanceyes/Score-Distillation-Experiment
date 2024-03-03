@@ -1,3 +1,4 @@
+
 from PIL import Image
 from pipeline_dds import DDSPipeline
 from pipeline_sds import SDSPipeline
@@ -7,6 +8,7 @@ from transformers import BlipForConditionalGeneration, BlipProcessor
 
 import torch
 import torch.nn.functional as F
+
 
 def load_image(image_path, h=512, w=512):
     image = Image.open(image_path).convert('RGB').resize((h, w))
@@ -29,7 +31,7 @@ def load_model(args, pipeline_type=None):
         "num_train_timesteps": args.n_train_steps or 1000,
         "min_percent": args.min_percent or 0.,
         "max_percent": args.max_percent or 1.,
-        "loss_weight": args.loss_weight or 2000,
+        "loss_weight": args.loss_weight or 1.,
         "save_img_steps": args.save_img_steps or 50,
     }
     
@@ -55,7 +57,7 @@ def load_model(args, pipeline_type=None):
         )
     
     if pipeline_type is not None:
+        pipeline.scheduler.config.num_train_timesteps = args.n_train_steps
         pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
-        pipeline.scheduler.config.steps_offset = 0
-
+        
     return pipeline
