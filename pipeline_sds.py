@@ -356,7 +356,7 @@ class SDSPipeline(StableDiffusionPipeline):
             )
 
         _, noises = self.invert(
-            prompt="",
+            prompt_embeds=null_prompt_embeds,
             latents=source_z_0,
             height=height, 
             width=width, 
@@ -423,7 +423,7 @@ class SDSPipeline(StableDiffusionPipeline):
 
         num_warmup_steps = num_inference_steps - num_inference_steps * self.scheduler.order
 
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        with self.progress_bar(total=num_inference_steps*num_iter_per_timestep) as progress_bar:
             for i, timestep in enumerate(timesteps):
                 if timestep.item() >= self.num_train_timesteps:
                     timestep = torch.tensor(self.num_train_timesteps - 1, device=device)
@@ -479,7 +479,7 @@ class SDSPipeline(StableDiffusionPipeline):
     @torch.no_grad()
     def invert(
         self,
-        prompt: Union[str, List[str]],
+        prompt: Union[str, List[str]] = None,
         img: Union[torch.FloatTensor, Image.Image, np.ndarray] = None,
         latents: torch.FloatTensor = None,
         height: Optional[int] = None,
@@ -522,15 +522,16 @@ class SDSPipeline(StableDiffusionPipeline):
         do_classifier_free_guidance = guidance_scale > 1.0
 
         # 3. Encode input prompt
-        prompt_embeds = self._encode_prompt(
-            prompt=prompt,
-            device=device,
-            num_images_per_prompt=num_images_per_prompt,
-            do_classifier_free_guidance=do_classifier_free_guidance,
-            negative_prompt=negative_prompt,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds
-        )
+        if prompt_embeds is None:
+            prompt_embeds = self._encode_prompt(
+                prompt=prompt,
+                device=device,
+                num_images_per_prompt=num_images_per_prompt,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                negative_prompt=negative_prompt,
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds
+            )
         
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps)
@@ -729,6 +730,7 @@ class SDSPipeline(StableDiffusionPipeline):
                 latent_model_input = (
                     torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 )
+                
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, timestep)
 
                 # predict the noise residual

@@ -3,12 +3,12 @@ from glob import glob
 from typing import *
 from utils.utils import load_model, load_image
 from pipeline_sds import SDSPipeline
+from diffusers.utils.torch_utils import randn_tensor
 
 import os
 import torch
 import argparse
 import numpy as np
-
 
 def run_by_img(
     pipeline: SDSPipeline,
@@ -19,6 +19,7 @@ def run_by_img(
     guidance_scale: float = 7.5,
     negative_prompt: Optional[Union[str, List[str]]] = None,
     num_images_per_prompt: int = 1,
+    target_z_T: Optional[torch.FloatTensor] = None,
     generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
     save_dir: str = "./outputs",
     save_noises: bool = False,
@@ -36,6 +37,7 @@ def run_by_img(
         guidance_scale=guidance_scale,
         negative_prompt=negative_prompt,
         num_images_per_prompt=num_images_per_prompt,
+        target_z_T=target_z_T,
         generator=generator,
         save_dir=save_dir,
         save_noises=save_noises,
@@ -63,6 +65,7 @@ def main():
     parser.add_argument('--loss_weight', type=float, default=1, help="loss weight")
     parser.add_argument('--save_img_steps', type=int, default=50, help="save img steps")
     parser.add_argument('--cuda', type=int, default=0, help="gpu device id")
+    parser.add_argument('--use_same_latent', action='store_true', default=False, help="use same latent")
     parser.add_argument('--use_perpendicular', action='store_true', default=False, help="use perpendicular")
     parser.add_argument('--torch_dtype', type=str, default="no", choices=["no", "fp16", "bf16"], help="dtype for less vram memory")
     parser.add_argument('--v2_1', action='store_true', default=False, help="use stable diffusion v2.1")
@@ -77,16 +80,25 @@ def main():
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
+    target_z_T = None
+
     if args.img_path:
         img_path = args.img_path
         img = load_image(img_path)
     else:
         sd_pipeline = load_model(args).to(device)
+        
+        if args.use_same_latent:
+            num_channels_latents = sd_pipeline.unet.config.in_channels
+            shape = (1, num_channels_latents, sd_pipeline.unet.config.sample_size, sd_pipeline.unet.config.sample_size)
+            target_z_T = randn_tensor(shape, generator=generator, device=device, dtype=sd_pipeline.text_encoder.dtype)
+        
         result = sd_pipeline(
             prompt=prompt,
             num_inference_steps=50,
             guidance_scale=args.guidance_scale,
             generator=generator,
+            latents=target_z_T,
         ).images[0]
 
         img = result
@@ -100,6 +112,7 @@ def main():
         num_inference_steps=args.n_steps,
         num_iter_per_timestep=args.n_iter_per_step,
         guidance_scale=args.guidance_scale,
+        target_z_T=target_z_T,
         generator=generator,
         save_dir=args.save_dir,
         save_noises=args.save_noises,

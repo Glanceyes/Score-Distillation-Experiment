@@ -56,8 +56,7 @@ def load_model(args, pipeline_type=None):
             safety_checker=None,
         )
     
-    if pipeline_type is not None:
-        pipeline.scheduler.config.num_train_timesteps = args.n_train_steps
-        pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+    pipeline.scheduler.config.num_train_timesteps = args.n_train_steps
+    pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
         
     return pipeline
