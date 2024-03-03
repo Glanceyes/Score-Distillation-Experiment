@@ -63,7 +63,6 @@ def main():
     parser.add_argument('--loss_weight', type=float, default=1, help="loss weight")
     parser.add_argument('--save_img_steps', type=int, default=50, help="save img steps")
     parser.add_argument('--cuda', type=int, default=0, help="gpu device id")
-    
     parser.add_argument('--use_perpendicular', action='store_true', default=False, help="use perpendicular")
     parser.add_argument('--torch_dtype', type=str, default="no", choices=["no", "fp16", "bf16"], help="dtype for less vram memory")
     parser.add_argument('--v2_1', action='store_true', default=False, help="use stable diffusion v2.1")
