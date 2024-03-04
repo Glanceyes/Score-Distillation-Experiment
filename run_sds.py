@@ -95,8 +95,8 @@ def main():
         
         result = sd_pipeline(
             prompt=prompt,
-            num_inference_steps=50,
-            guidance_scale=args.guidance_scale,
+            num_inference_steps=args.n_steps - 1,
+            guidance_scale=1.0,
             generator=generator,
             latents=target_z_T,
         ).images[0]

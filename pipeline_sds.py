@@ -403,8 +403,8 @@ class SDSPipeline(StableDiffusionPipeline):
 
         self.unet = prepare_unet(self.unet)
 
-        self.min_step = int(self.num_train_timesteps * self.min_percent)
-        self.max_step = int(self.num_train_timesteps * self.max_percent)
+        min_step = int(self.num_train_timesteps * self.min_percent)
+        max_step = int(self.num_train_timesteps * self.max_percent)
 
         sds_loss = SDSLoss(
             device=device,
@@ -421,10 +421,12 @@ class SDSPipeline(StableDiffusionPipeline):
             weight_decay=self.weight_decay
         )
 
-        num_warmup_steps = num_inference_steps - num_inference_steps * self.scheduler.order
 
-        with self.progress_bar(total=num_inference_steps*num_iter_per_timestep) as progress_bar:
-            for i, timestep in enumerate(timesteps):
+        clipped_num_inference_steps = max_step - min_step
+        num_warmup_steps = clipped_num_inference_steps - clipped_num_inference_steps * self.scheduler.order
+
+        with self.progress_bar(total=clipped_num_inference_steps*num_iter_per_timestep) as progress_bar:
+            for i, timestep in enumerate(timesteps[num_inference_steps - max_step:num_inference_steps - min_step]):
                 if timestep.item() >= self.num_train_timesteps:
                     timestep = torch.tensor(self.num_train_timesteps - 1, device=device)
                 t = timestep.item()
@@ -454,12 +456,12 @@ class SDSPipeline(StableDiffusionPipeline):
                         loss = loss.sum() / (latents.shape[0] * latents.shape[1])
                         loss = loss * self.loss_weight
                         
-                        logger.info(f"Step {i+1}/{num_inference_steps} - Loss: {loss.item()}")  
+                        logger.info(f"Step {i+1}/{clipped_num_inference_steps} - Loss: {loss.item()}")  
                         loss.backward(retain_graph=True)
                     
                     optimizer.step()
 
-                    if i == num_inference_steps - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    if i == clipped_num_inference_steps - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                         progress_bar.update()
                         if callback is not None and i % callback_steps == 0:
                             callback(i, timestep, latents)
